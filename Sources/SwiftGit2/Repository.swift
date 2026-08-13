@@ -733,6 +733,38 @@ public final class Repository {
 		return Result.success(())
 	}
 
+	/// Move a local branch's ref to point at a new target -- a fast-forward,
+	/// e.g. after fetching -- without touching HEAD at all. If HEAD is
+	/// already attached to this branch (the normal case: not detached, not
+	/// on some other branch), HEAD "moves" along with it for free, since
+	/// HEAD just points at the ref symbolically.
+	///
+	/// This is deliberately not `setHEAD(_ oid:)`: that calls
+	/// `git_repository_set_head_detached`, which detaches HEAD from the
+	/// branch entirely -- exactly wrong for a fast-forward pull, which
+	/// should leave the user still "on" their branch, just further along
+	/// it. Using `setHEAD(_ oid:)` for this (an earlier version of
+	/// VaultLifecycle.pull did) left the repository in detached-HEAD state
+	/// after every successful pull, which then broke every subsequent
+	/// operation assuming an attached branch (push, another pull) with
+	/// "HEAD is not on a branch (detached)".
+	///
+	/// :param: name   The local branch's short name (e.g. "main"), not the
+	///                full "refs/heads/main" form.
+	/// :param: target The commit to fast-forward the branch to.
+	public func updateLocalBranch(named name: String, to target: OID) -> Result<(), NSError> {
+		var oid = target.oid
+		var ref: OpaquePointer? = nil
+		let result = git_reference_create(&ref, self.pointer, "refs/heads/" + name, &oid, 1, "pull: Fast-forward")
+		if let ref {
+			git_reference_free(ref)
+		}
+		guard result == GIT_OK.rawValue else {
+			return Result.failure(NSError(gitError: result, pointOfFailure: "git_reference_create"))
+		}
+		return Result.success(())
+	}
+
 	/// Check out HEAD.
 	///
 	/// :param: strategy The checkout strategy to use.
