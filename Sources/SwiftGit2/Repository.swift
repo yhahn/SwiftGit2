@@ -494,6 +494,21 @@ public final class Repository {
 		}
 	}
 
+	/// Whether `descendant` has `ancestor` in its history -- i.e. moving a branch
+	/// pointer from `ancestor` to `descendant` is a fast-forward, losing no commits.
+	/// Matches `git_graph_descendant_of`'s semantics: a commit is not its own
+	/// descendant, so this is `false` when the two OIDs are equal (already
+	/// up to date, not "safe to fast-forward" as a distinct case worth conflating).
+	public func isDescendant(_ descendant: OID, of ancestor: OID) -> Result<Bool, NSError> {
+		var descendantOid = descendant.oid
+		var ancestorOid = ancestor.oid
+		let result = git_graph_descendant_of(self.pointer, &descendantOid, &ancestorOid)
+		guard result == 0 || result == 1 else {
+			return .failure(NSError(gitError: result, pointOfFailure: "git_graph_descendant_of"))
+		}
+		return .success(result == 1)
+	}
+
 	// MARK: - Reference Lookups
 
 	/// Load all the references with the given prefix (e.g. "refs/heads/")
