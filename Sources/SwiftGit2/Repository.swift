@@ -689,6 +689,30 @@ public final class Repository {
 		}
 	}
 
+	/// Perform a commit of the staged files with the specified message and
+	/// signature, creating the repository's first commit if HEAD is
+	/// unborn (no commits yet) rather than requiring one to already exist.
+	///
+	/// Added for Hemlock (github.com/yhahn/SwiftGit2): the existing
+	/// `commit(message:signature:)` looks up HEAD as the parent
+	/// unconditionally, so it cannot create a fresh repository's first
+	/// commit. `unsafeIndex()`/tree-writing are module-internal, so this
+	/// has to live here rather than being composed from outside.
+	public func commitStagedChanges(message: String, signature: Signature) -> Result<Commit, NSError> {
+		if case .success = HEAD() {
+			return commit(message: message, signature: signature)
+		}
+		return unsafeIndex().flatMap { index in
+			defer { git_index_free(index) }
+			var treeOID = git_oid()
+			let treeResult = git_index_write_tree(&treeOID, index)
+			guard treeResult == GIT_OK.rawValue else {
+				return .failure(NSError(gitError: treeResult, pointOfFailure: "git_index_write_tree"))
+			}
+			return commit(tree: OID(treeOID), parents: [], message: message, signature: signature)
+		}
+	}
+
 	/// Perform a commit of the staged files with the specified message and signature,
 	/// assuming we are not doing a merge and using the current tip as the parent.
 	public func commit(message: String, signature: Signature) -> Result<Commit, NSError> {
