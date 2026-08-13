@@ -59,6 +59,92 @@ private func checkoutOptions(strategy: CheckoutStrategy,
 	return options
 }
 
+/// Accepts any host key with no verification against a known-hosts store.
+/// There's no `~/.ssh/known_hosts` on iOS, and without *some*
+/// `certificate_check` callback registered, libgit2's SSH transport
+/// rejects every host outright ("invalid or unknown remote ssh hostkey" --
+/// see ssh_libssh2.c's `check_certificate`, which only trusts a host when
+/// either a known-hosts match or a non-NULL callback says so). This is a
+/// real, deliberate simplification, not an oversight: no TOFU, no pinning,
+/// no way for a caller to review or reject an unexpected host key. A real
+/// fix needs a known-hosts store the app can persist and let the user
+/// inspect, which nothing here provides yet.
+private func acceptAnyCertificateCallback(
+	cert: UnsafeMutablePointer<git_cert>?,
+	valid: Int32,
+	host: UnsafePointer<CChar>?,
+	payload: UnsafeMutableRawPointer?
+) -> Int32 {
+	return 0
+}
+
+/// (receivedObjects, totalObjects, receivedBytes) -- the same fields
+/// `git clone`'s own "Receiving objects: N% (x/y), z bytes" line reports,
+/// straight from libgit2's git_indexer_progress.
+public typealias FetchProgressBlock = (Int, Int, Int) -> Void
+
+/// git_remote_callbacks has exactly one shared `payload` for every
+/// callback registered on it (credentials, certificate_check,
+/// transfer_progress, ...) -- unlike git_checkout_options, which gives
+/// progress its own independent payload field. Credentials.toPointer()'s
+/// `Wrapper<Credentials>` is consumed (freed) the first time
+/// `credentialsCallback` runs, which is fine when it's the only callback
+/// reading that payload -- but transfer_progress can fire dozens of times
+/// over one clone, and credentials can legitimately be re-requested during
+/// auth negotiation, so a payload usable only once isn't safe to share
+/// between them. This context is retained for the whole clone instead,
+/// and the caller (`Repository.clone`) explicitly releases it via `defer`
+/// once git_clone returns, rather than relying on a callback's last
+/// invocation to free it -- correct even if progress is nil or the clone
+/// fails before any progress callback ever fires.
+private final class CloneCallbackContext {
+	let credentials: Credentials
+	let progress: FetchProgressBlock?
+
+	init(credentials: Credentials, progress: FetchProgressBlock?) {
+		self.credentials = credentials
+		self.progress = progress
+	}
+}
+
+private func cloneCredentialsCallback(
+	cred: UnsafeMutablePointer<UnsafeMutablePointer<git_cred>?>?,
+	url: UnsafePointer<CChar>?,
+	username: UnsafePointer<CChar>?,
+	_: UInt32,
+	payload: UnsafeMutableRawPointer?
+) -> Int32 {
+	guard let payload else { return -1 }
+	let context = Unmanaged<CloneCallbackContext>.fromOpaque(payload).takeUnretainedValue()
+	return performCredentialsCallback(context.credentials, cred: cred, username: username)
+}
+
+private func cloneTransferProgressCallback(
+	stats: UnsafePointer<git_indexer_progress>?,
+	payload: UnsafeMutableRawPointer?
+) -> Int32 {
+	guard let payload, let stats else { return 0 }
+	let context = Unmanaged<CloneCallbackContext>.fromOpaque(payload).takeUnretainedValue()
+	context.progress?(Int(stats.pointee.received_objects), Int(stats.pointee.total_objects), Int(stats.pointee.received_bytes))
+	return 0
+}
+
+private func cloneFetchOptions(payload: UnsafeMutableRawPointer) -> git_fetch_options {
+	let pointer = UnsafeMutablePointer<git_fetch_options>.allocate(capacity: 1)
+	git_fetch_init_options(pointer, UInt32(GIT_FETCH_OPTIONS_VERSION))
+
+	var options = pointer.move()
+
+	pointer.deallocate()
+
+	options.callbacks.payload = payload
+	options.callbacks.credentials = cloneCredentialsCallback
+	options.callbacks.certificate_check = acceptAnyCertificateCallback
+	options.callbacks.transfer_progress = cloneTransferProgressCallback
+
+	return options
+}
+
 private func fetchOptions(credentials: Credentials) -> git_fetch_options {
 	let pointer = UnsafeMutablePointer<git_fetch_options>.allocate(capacity: 1)
 	git_fetch_init_options(pointer, UInt32(GIT_FETCH_OPTIONS_VERSION))
@@ -69,6 +155,7 @@ private func fetchOptions(credentials: Credentials) -> git_fetch_options {
 
 	options.callbacks.payload = credentials.toPointer()
 	options.callbacks.credentials = credentialsCallback
+	options.callbacks.certificate_check = acceptAnyCertificateCallback
 
 	return options
 }
@@ -83,6 +170,7 @@ private func pushOptions(credentials: Credentials) -> git_push_options {
 
 	options.callbacks.payload = credentials.toPointer()
 	options.callbacks.credentials = credentialsCallback
+	options.callbacks.certificate_check = acceptAnyCertificateCallback
 
 	return options
 }
@@ -182,15 +270,23 @@ public final class Repository {
 	/// credentials      - Credentials to be used when connecting to the remote.
 	/// checkoutStrategy - The checkout strategy to use, if being checked out.
 	/// checkoutProgress - A block that's called with the progress of the checkout.
+	/// fetchProgress    - A block that's called with the progress of the network transfer
+	///                    (objects received/total, bytes received) -- the phase that actually
+	///                    dominates a clone's wall-clock time, unlike checkout.
 	///
 	/// Returns a `Result` with a `Repository` or an error.
 	public class func clone(from remoteURL: URL, to localURL: URL, localClone: Bool = false, bare: Bool = false,
 	                        credentials: Credentials = .default, checkoutStrategy: CheckoutStrategy = .Safe,
-	                        checkoutProgress: CheckoutProgressBlock? = nil) -> Result<Repository, NSError> {
+	                        checkoutProgress: CheckoutProgressBlock? = nil,
+	                        fetchProgress: FetchProgressBlock? = nil) -> Result<Repository, NSError> {
+		let context = CloneCallbackContext(credentials: credentials, progress: fetchProgress)
+		let contextPointer = Unmanaged.passRetained(context).toOpaque()
+		defer { Unmanaged<CloneCallbackContext>.fromOpaque(contextPointer).release() }
+
 		var options = cloneOptions(
 			bare: bare,
 			localClone: localClone,
-			fetchOptions: fetchOptions(credentials: credentials),
+			fetchOptions: cloneFetchOptions(payload: contextPointer),
 			checkoutOptions: checkoutOptions(strategy: checkoutStrategy, progress: checkoutProgress))
 
 		var pointer: OpaquePointer? = nil

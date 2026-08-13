@@ -186,6 +186,15 @@ let package = Package(
                 .define("GIT_SSH", to: "1"),
                 .define("GIT_SSH_EXEC", to: "1"),
                 .define("GIT_SSH_LIBSSH2", to: "1", .when(platforms: darwinPlatforms)),
+                // Separate macro from GIT_SSH_LIBSSH2 itself: gates
+                // git_credential_ssh_key_memory_new specifically (in-memory
+                // key blobs, vs. reading from a file path) -- credential.c
+                // errors "not built with ssh memory credentials" without
+                // it. There's no ~/.ssh on iOS, so in-memory is the only
+                // form that makes sense here; libssh2_userauth_publickey_
+                // frommemory is present in the vendored libssh2 (upstream
+                // CMake gates this same define on detecting that symbol).
+                .define("GIT_SSH_LIBSSH2_MEMORY_CREDENTIALS", to: "1", .when(platforms: darwinPlatforms)),
 
                 // Git HTTPS transport configuration. GIT_HTTPPARSER_BUILTIN
                 // just selects the bundled (portable, TLS-agnostic) llhttp
