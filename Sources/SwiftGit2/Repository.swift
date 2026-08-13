@@ -133,13 +133,17 @@ public final class Repository {
 
 	/// Create a new repository at the given URL.
 	///
-	/// URL - The URL of the repository.
+	/// URL  - The URL of the repository.
+	/// bare - Create a bare repository (no working directory) -- what a push
+	///        target needs to be, since pushing to a checked-out branch on a
+	///        non-bare repository is refused (or leaves the working directory
+	///        out of sync with HEAD, depending on transport).
 	///
 	/// Returns a `Result` with a `Repository` or an error.
-	public class func create(at url: URL) -> Result<Repository, NSError> {
+	public class func create(at url: URL, bare: Bool = false) -> Result<Repository, NSError> {
 		var pointer: OpaquePointer? = nil
 		let result = url.withUnsafeFileSystemRepresentation {
-			git_repository_init(&pointer, $0, 0)
+			git_repository_init(&pointer, $0, bare ? 1 : 0)
 		}
 
 		guard result == GIT_OK.rawValue else {
