@@ -36,8 +36,64 @@ let package = Package(
             dependencies: ["SwiftGit2", "Clibgit2", "Quick", "Nimble", "ZipArchive"],
             resources: [.copy("Fixtures")]
         ),
+        // The crypto backend libssh2 needs for real SSH auth (key parsing,
+        // signing, ciphers) on Apple platforms -- there's no CommonCrypto/
+        // SecureTransport-equivalent libssh2 backend, and OpenSSL/libgcrypt
+        // aren't options here (system OpenSSL isn't a public iOS API;
+        // libgcrypt is GPL). mbedTLS is vendored directly (Apache-2.0,
+        // no external dependency), same shape as everything else forked
+        // into this package. `library/` minus `ssl_*.c`: those implement
+        // mbedTLS's own TLS record layer/handshake state machines, which
+        // libssh2's mbedtls.c backend never touches -- it only needs the
+        // crypto primitives (rsa/bignum/cipher/entropy/ctr_drbg/pk), and
+        // one of the excluded files (ssl_debug_helpers_generated.c) needs
+        // Python codegen we have no reason to run for code we don't use.
+        .target(
+            name: "Cmbedtls",
+            path: "mbedtls",
+            publicHeadersPath: "include",
+            cSettings: [
+                .headerSearchPath("library"),
+            ]
+        ),
+        // SSH transport for libgit2's GIT_SSH_LIBSSH2 path (see Clibgit2
+        // below) -- vendored directly, same reasoning as mbedTLS: no
+        // SwiftPM package for this exists, unlike the still-unused
+        // GIT_SSH_EXEC path this replaces on Darwin (which shells out to a
+        // system `ssh` binary via fork+exec, impossible in an iOS sandbox).
+        // `src/` minus the crypto backends we're not using (openssl.c,
+        // libgcrypt.c, wincng.c, os400qc3.c) -- keeping mbedtls.c only.
+        .target(
+            name: "Clibssh2",
+            dependencies: ["Cmbedtls"],
+            path: "libssh2",
+            exclude: [
+                "src/openssl.c",
+                "src/openssl.h",
+                "src/libgcrypt.c",
+                "src/libgcrypt.h",
+                "src/wincng.c",
+                "src/wincng.h",
+                "src/os400qc3.c",
+                "src/os400qc3.h",
+            ],
+            sources: ["src"],
+            publicHeadersPath: "include",
+            cSettings: [
+                .headerSearchPath("src"),
+                .define("LIBSSH2_MBEDTLS", to: "1"),
+            ]
+        ),
         .target(
             name: "Clibgit2",
+            dependencies: [
+                // Only for the SSH transport (GIT_SSH_LIBSSH2 below) --
+                // Darwin only, matching GIT_HTTPS's own scoping: the
+                // subprocess-based GIT_SSH_EXEC path stays the Linux
+                // default rather than pulling mbedTLS/libssh2 into a
+                // build that doesn't need real SSH auth.
+                .target(name: "Clibssh2", condition: .when(platforms: darwinPlatforms)),
+            ],
             path: "libgit2",
             exclude: [
                 "deps/llhttp/CMakeLists.txt",
@@ -117,12 +173,19 @@ let package = Package(
                 .define("MAX_NAME_SIZE", to: "32"),
                 .define("MAX_NAME_COUNT", to: "10000"),
 
-                // Git SSH transport configuration. Unchanged on Linux: this
-                // only shells out to a system ssh binary at runtime
-                // (GIT_SSH_EXEC), which doesn't need anything Darwin-only
-                // to compile.
+                // Git SSH transport configuration. GIT_SSH_EXEC shells out
+                // to a system ssh binary at runtime (fork+exec) -- fine on
+                // Linux, impossible in an iOS app sandbox (no subprocess
+                // spawning at all, and no ssh binary bundled anyway; same
+                // wall documented for Foundation.Process/ProperMDCLI
+                // elsewhere in the Hemlock repo). On Darwin, GIT_SSH_LIBSSH2
+                // takes priority instead (see ssh.c's #ifdef order: LIBSSH2
+                // wins over EXEC when both are defined) -- a real linked-in
+                // SSH client, no subprocess needed, backed by the vendored
+                // libssh2+mbedTLS targets above.
                 .define("GIT_SSH", to: "1"),
                 .define("GIT_SSH_EXEC", to: "1"),
+                .define("GIT_SSH_LIBSSH2", to: "1", .when(platforms: darwinPlatforms)),
 
                 // Git HTTPS transport configuration. GIT_HTTPPARSER_BUILTIN
                 // just selects the bundled (portable, TLS-agnostic) llhttp
