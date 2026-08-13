@@ -9,6 +9,12 @@
 import Foundation
 import Clibgit2
 
+#if canImport(Glibc)
+import Glibc
+#elseif canImport(Darwin)
+import Darwin
+#endif
+
 public typealias CheckoutProgressBlock = (String?, Int, Int) -> Void
 
 /// Helper function used as the libgit2 progress callback in git_checkout_options.
@@ -65,6 +71,33 @@ private func fetchOptions(credentials: Credentials) -> git_fetch_options {
 	options.callbacks.credentials = credentialsCallback
 
 	return options
+}
+
+private func pushOptions(credentials: Credentials) -> git_push_options {
+	let pointer = UnsafeMutablePointer<git_push_options>.allocate(capacity: 1)
+	git_push_init_options(pointer, UInt32(GIT_PUSH_OPTIONS_VERSION))
+
+	var options = pointer.move()
+
+	pointer.deallocate()
+
+	options.callbacks.payload = credentials.toPointer()
+	options.callbacks.credentials = credentialsCallback
+
+	return options
+}
+
+/// Build a `git_strarray` from Swift strings for the duration of `body`, freeing the
+/// C strings it allocates afterward. libgit2 only reads from the array during the
+/// call, so this narrower lifetime (vs. `git_strarray_free`, meant for arrays libgit2
+/// itself allocated) is the right match.
+private func withGitStrArray<T>(_ strings: [String], _ body: (inout git_strarray) -> T) -> T {
+	var cStrings: [UnsafeMutablePointer<Int8>?] = strings.map { strdup($0) }
+	defer { cStrings.forEach { free($0) } }
+	return cStrings.withUnsafeMutableBufferPointer { buffer in
+		var strarray = git_strarray(strings: buffer.baseAddress, count: buffer.count)
+		return body(&strarray)
+	}
 }
 
 private func cloneOptions(bare: Bool = false, localClone: Bool = false, fetchOptions: git_fetch_options? = nil,
@@ -406,6 +439,54 @@ public final class Repository {
 				let result = git_remote_fetch(pointer, nil, &opts, nil)
 				guard result == GIT_OK.rawValue else {
 					let err = NSError(gitError: result, pointOfFailure: "git_remote_fetch")
+					return .failure(err)
+				}
+				return .success(())
+			}
+		}
+	}
+
+	/// Download new data and update tips, authenticating with the given credentials.
+	/// `fetch(_:)` above has no way to do this -- it always builds fetch options with
+	/// no credentials callback wired up, so it only works against a remote that needs
+	/// no auth.
+	public func fetch(_ remote: Remote, credentials: Credentials) -> Result<(), NSError> {
+		return remoteLookup(named: remote.name) { remote in
+			remote.flatMap { pointer in
+				var opts = fetchOptions(credentials: credentials)
+
+				let result = git_remote_fetch(pointer, nil, &opts, nil)
+				guard result == GIT_OK.rawValue else {
+					let err = NSError(gitError: result, pointOfFailure: "git_remote_fetch")
+					return .failure(err)
+				}
+				return .success(())
+			}
+		}
+	}
+
+	/// Register a new remote in the repository's configuration.
+	public func addRemote(name: String, url: String) -> Result<Remote, NSError> {
+		var pointer: OpaquePointer? = nil
+		let result = git_remote_create(&pointer, self.pointer, name, url)
+		guard result == GIT_OK.rawValue, let pointer else {
+			return .failure(NSError(gitError: result, pointOfFailure: "git_remote_create"))
+		}
+		defer { git_remote_free(pointer) }
+		return .success(Remote(pointer))
+	}
+
+	/// Push refspecs (e.g. "refs/heads/main:refs/heads/main") to the remote,
+	/// authenticating with the given credentials.
+	public func push(_ remote: Remote, refspecs: [String], credentials: Credentials) -> Result<(), NSError> {
+		return remoteLookup(named: remote.name) { remote in
+			remote.flatMap { pointer in
+				var opts = pushOptions(credentials: credentials)
+				let result = withGitStrArray(refspecs) { strarray in
+					git_remote_push(pointer, &strarray, &opts)
+				}
+				guard result == GIT_OK.rawValue else {
+					let err = NSError(gitError: result, pointOfFailure: "git_remote_push")
 					return .failure(err)
 				}
 				return .success(())
