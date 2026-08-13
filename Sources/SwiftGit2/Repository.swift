@@ -157,7 +157,16 @@ public final class Repository {
 			checkoutOptions: checkoutOptions(strategy: checkoutStrategy, progress: checkoutProgress))
 
 		var pointer: OpaquePointer? = nil
+		// isFileReferenceURL() is an Apple-only NSURL concept (a URL that
+		// tracks file identity across renames, distinct from an ordinary
+		// file:// URL) with no equivalent in swift-corelibs-foundation on
+		// Linux. absoluteString alone is a valid git remote string for
+		// both file:// and remote URLs, so it's the portable fallback.
+		#if canImport(ObjectiveC)
 		let remoteURLString = (remoteURL as NSURL).isFileReferenceURL() ? remoteURL.path : remoteURL.absoluteString
+		#else
+		let remoteURLString = remoteURL.absoluteString
+		#endif
 		let result = localURL.withUnsafeFileSystemRepresentation { localPath in
 			git_clone(&pointer, remoteURLString, localPath, &options)
 		}

@@ -2,6 +2,10 @@
 
 import PackageDescription
 
+// Matches the platforms declared below, for use with `.when(platforms:)`
+// on Clibgit2's per-platform hash/transport backend selection.
+let darwinPlatforms: [Platform] = [.macOS, .iOS, .tvOS, .visionOS, .macCatalyst]
+
 let package = Package(
     name: "SwiftGit2",
     platforms: [
@@ -52,10 +56,13 @@ let package = Package(
                 "src/libgit2/git2.rc",
                 "src/util/CMakeLists.txt",
                 "src/util/git2_features.h.in",
-                "src/util/hash/builtin.c",
-                "src/util/hash/builtin.h",
-                "src/util/hash/collisiondetect.c",
-                "src/util/hash/collisiondetect.h",
+                // builtin.c/.h and collisiondetect.c/.h (the portable
+                // Linux hash backends) are NOT excluded here, unlike
+                // upstream mbernson/SwiftGit2 -- they're patched (in
+                // github.com/yhahn/libgit2) to self-guard on the same
+                // macros that select them below, so it's safe to always
+                // compile them and let each platform's defines pick the
+                // right backend.
                 "src/util/hash/openssl.c",
                 "src/util/hash/openssl.h",
                 "src/util/hash/win32.c",
@@ -80,6 +87,9 @@ let package = Package(
                   // Disable warning: "a function definition without a prototype is deprecated"
                   "-Wno-deprecated-non-prototype",
                 ]),
+                // glibc hides qsort_r's prototype without this, which is
+                // what GIT_QSORT_GNU below needs to actually be declared.
+                .unsafeFlags(["-D_GNU_SOURCE"], .when(platforms: [.linux])),
 
                 .headerSearchPath("deps/llhttp"),
                 .headerSearchPath("deps/pcre"),
@@ -90,7 +100,6 @@ let package = Package(
 
                 .define("LIBGIT2_NO_FEATURES_H"),
                 .define("GIT_ARCH_64", to: "1"),
-                .define("GIT_QSORT_BSD", to: "1"),
                 .define("GIT_IO_POLL", to: "1"),
 
                 // Git regex configuration
@@ -108,18 +117,46 @@ let package = Package(
                 .define("MAX_NAME_SIZE", to: "32"),
                 .define("MAX_NAME_COUNT", to: "10000"),
 
-                // Git SSH transport configuration
+                // Git SSH transport configuration. Unchanged on Linux: this
+                // only shells out to a system ssh binary at runtime
+                // (GIT_SSH_EXEC), which doesn't need anything Darwin-only
+                // to compile.
                 .define("GIT_SSH", to: "1"),
                 .define("GIT_SSH_EXEC", to: "1"),
 
-                // Git HTTPS transport configuration
-                .define("GIT_HTTPS", to: "1"),
+                // Git HTTPS transport configuration. GIT_HTTPPARSER_BUILTIN
+                // just selects the bundled (portable, TLS-agnostic) llhttp
+                // parser, so it's unconditional. GIT_HTTPS/
+                // GIT_SECURE_TRANSPORT are Darwin-only: actually completing
+                // a TLS handshake needs a real backend, and SecureTransport
+                // is the only one wired up. Local git operations
+                // (init/status/add/commit) don't need it, so it's simplest
+                // to disable HTTPS transport entirely on Linux rather than
+                // pull in OpenSSL/mbedTLS for a path we don't exercise
+                // there.
                 .define("GIT_HTTPPARSER_BUILTIN", to: "1"),
-                .define("GIT_SECURE_TRANSPORT", to: "1"),
+                .define("GIT_HTTPS", to: "1", .when(platforms: darwinPlatforms)),
+                .define("GIT_SECURE_TRANSPORT", to: "1", .when(platforms: darwinPlatforms)),
 
-                // Git cryptography configuration
-                .define("GIT_SHA1_COMMON_CRYPTO", to: "1"),
-                .define("GIT_SHA256_COMMON_CRYPTO", to: "1"),
+                // Git cryptography configuration. Darwin uses CommonCrypto;
+                // Linux uses libgit2's own portable backends (no external
+                // dependency): CollisionDetection for SHA1, builtin for
+                // SHA256 -- the same choices CMake's USE_SHA1/USE_SHA256
+                // make when neither OpenSSL nor a platform-native backend
+                // is available. Both GIT_QSORT_BSD and the hash defines
+                // rely on the guards patched into github.com/yhahn/libgit2
+                // (see that fork's `linux-portable-hash` branch) to select
+                // the right backend per platform instead of colliding.
+                .define("GIT_QSORT_BSD", to: "1", .when(platforms: darwinPlatforms)),
+                .define("GIT_SHA1_COMMON_CRYPTO", to: "1", .when(platforms: darwinPlatforms)),
+                .define("GIT_SHA256_COMMON_CRYPTO", to: "1", .when(platforms: darwinPlatforms)),
+
+                .define("GIT_QSORT_GNU", to: "1", .when(platforms: [.linux])),
+                .define("GIT_SHA1_COLLISIONDETECT", to: "1", .when(platforms: [.linux])),
+                .define("GIT_SHA256_BUILTIN", to: "1", .when(platforms: [.linux])),
+                .define("SHA1DC_NO_STANDARD_INCLUDES", to: "1", .when(platforms: [.linux])),
+                .define("SHA1DC_CUSTOM_INCLUDE_SHA1_C", to: "\"git2_util.h\"", .when(platforms: [.linux])),
+                .define("SHA1DC_CUSTOM_INCLUDE_UBC_CHECK_C", to: "\"git2_util.h\"", .when(platforms: [.linux])),
             ]
         ),
     ]
