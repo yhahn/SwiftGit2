@@ -765,6 +765,37 @@ public final class Repository {
 		return Result.success(())
 	}
 
+	/// Discard all uncommitted changes -- staged and unstaged -- and reset
+	/// both the index and the working tree to exactly match `target`
+	/// (`git reset --hard <target>`).
+	///
+	/// Deliberately not built out of `checkout(strategy: .Force)`: that
+	/// only updates the working tree, and never touches the index at all
+	/// -- a file staged with `git add` but never committed survives a
+	/// plain forced checkout completely untouched, which isn't "discard
+	/// everything," it's "discard everything except whatever happened to
+	/// be staged." `git_reset(..., GIT_RESET_HARD, ...)` resets both in
+	/// one call, which is what a host-app "revert to a known-good state"
+	/// action actually needs to mean. Untracked/ignored files are left
+	/// alone either way -- real `git reset --hard`'s own behavior, not
+	/// `git clean`'s -- so this doesn't need `.RemoveUntracked` in its
+	/// checkout strategy.
+	///
+	/// :param: target The commit to reset to -- typically the
+	///                 repository's own current HEAD, for "throw away
+	///                 everything since the last commit."
+	/// :returns: Returns a result with void or the error that occurred.
+	public func resetHard(to target: OID) -> Result<(), NSError> {
+		return withGitObject(target, type: GIT_OBJECT_COMMIT) { commit in
+			var options = checkoutOptions(strategy: .Force, progress: nil)
+			let result = git_reset(self.pointer, commit, GIT_RESET_HARD, &options)
+			guard result == GIT_OK.rawValue else {
+				return Result.failure(NSError(gitError: result, pointOfFailure: "git_reset"))
+			}
+			return Result.success(())
+		}
+	}
+
 	/// Check out HEAD.
 	///
 	/// :param: strategy The checkout strategy to use.
