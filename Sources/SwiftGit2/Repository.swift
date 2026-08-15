@@ -708,6 +708,53 @@ public final class Repository {
 		return Result.success(value)
 	}
 
+	/// A textual diff (unified patch format -- the same text `git diff`
+	/// itself prints) between HEAD and the working tree, going through
+	/// the index the way `git diff HEAD` does: staged and unstaged
+	/// changes both show up in one pass, which is "everything different
+	/// since the last commit," the question worth asking before deciding
+	/// whether to revert something.
+	///
+	/// :param: paths Optional exact repository-relative paths to scope
+	///                the diff to (not wildmatch patterns -- see
+	///                checkout(paths:)'s doc comment for why exact-match
+	///                is the right default for a caller-supplied path).
+	///                Empty means the whole repository.
+	/// :returns: Returns a result with the patch text (empty string if
+	///            nothing differs) or the error that occurred.
+	public func diffHeadToWorkingDirectory(paths: [String] = []) -> Result<String, NSError> {
+		var treeObject: OpaquePointer? = nil
+		let revparseResult = "HEAD^{tree}".withCString { git_revparse_single(&treeObject, self.pointer, $0) }
+		guard revparseResult == GIT_OK.rawValue, let treeObject else {
+			return .failure(NSError(gitError: revparseResult, pointOfFailure: "git_revparse_single"))
+		}
+		defer { git_object_free(treeObject) }
+
+		return withGitStrArray(paths) { strarray -> Result<String, NSError> in
+			var options = git_diff_options()
+			git_diff_options_init(&options, UInt32(GIT_DIFF_OPTIONS_VERSION))
+			if !paths.isEmpty {
+				options.pathspec = strarray
+				options.flags |= GIT_DIFF_DISABLE_PATHSPEC_MATCH.rawValue
+			}
+
+			var diff: OpaquePointer? = nil
+			let diffResult = git_diff_tree_to_workdir_with_index(&diff, self.pointer, treeObject, &options)
+			guard diffResult == GIT_OK.rawValue, let diff else {
+				return .failure(NSError(gitError: diffResult, pointOfFailure: "git_diff_tree_to_workdir_with_index"))
+			}
+			defer { git_diff_free(diff) }
+
+			var buf = git_buf()
+			let bufResult = git_diff_to_buf(&buf, diff, GIT_DIFF_FORMAT_PATCH)
+			guard bufResult == GIT_OK.rawValue else {
+				return .failure(NSError(gitError: bufResult, pointOfFailure: "git_diff_to_buf"))
+			}
+			defer { git_buf_dispose(&buf) }
+			return .success(buf.ptr != nil ? String(cString: buf.ptr) : "")
+		}
+	}
+
 	/// Set HEAD to the given oid (detached).
 	///
 	/// :param: oid The OID to set as HEAD.
@@ -810,6 +857,38 @@ public final class Repository {
 		}
 
 		return Result.success(())
+	}
+
+	/// Check out HEAD for specific paths only (`git checkout HEAD --
+	/// <paths>`) -- resets the index AND working tree for just those
+	/// paths back to HEAD's content (git_checkout_head's own documented
+	/// behavior: "Updates files in the index and the working tree to
+	/// match the content of the commit pointed at by HEAD"), leaving
+	/// every other path in the working tree completely untouched.
+	///
+	/// `.DisablePathspecMatch` is always added to `strategy` -- `paths`
+	/// is exact filenames from a caller (e.g. a vault-relative path an
+	/// agent is reverting), not wildmatch patterns, and a path that
+	/// happens to contain a glob-special character (`[`, `*`, `?`)
+	/// should still match itself literally rather than being
+	/// reinterpreted as a pattern that could silently touch more files
+	/// than asked.
+	///
+	/// :param: paths Exact repository-relative file paths to check out.
+	/// :param: strategy The checkout strategy to use.
+	/// :param: progress A block that's called with the progress of the checkout.
+	/// :returns: Returns a result with void or the error that occurred.
+	public func checkout(paths: [String], strategy: CheckoutStrategy = .Force,
+	                     progress: CheckoutProgressBlock? = nil) -> Result<(), NSError> {
+		var options = checkoutOptions(strategy: strategy.union(.DisablePathspecMatch), progress: progress)
+		return withGitStrArray(paths) { strarray in
+			options.paths = strarray
+			let result = git_checkout_head(self.pointer, &options)
+			guard result == GIT_OK.rawValue else {
+				return Result.failure(NSError(gitError: result, pointOfFailure: "git_checkout_head"))
+			}
+			return Result.success(())
+		}
 	}
 
 	/// Check out the given OID.
